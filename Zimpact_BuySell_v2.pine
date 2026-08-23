@@ -1,0 +1,307 @@
+// ============================================================
+//  Zimpact Buy/Sell Signal  v2  (Pine Script v5)
+//  Params: 14 | RMA | 1.5 | high | low | hl2 | 24 | 0 | close
+//  Visual match: dual bands, TP levels, right-side price labels,
+//                teal oscillator, trade-active label, SL table
+// ============================================================
+//@version=5
+indicator("Zimpact Buy/Sell v2", overlay=true,
+  max_labels_count = 500,
+  max_lines_count  = 500)
+
+// ─────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────
+atrLen   = input.int   (14,    "ATR Length",       minval=1,   group="Core")
+atrMult  = input.float (1.5,   "ATR Multiplier",   minval=0.1, group="Core", step=0.1)
+maLen    = input.int   (24,    "MA Length (Teal)", minval=1,   group="Core")
+tpMult1  = input.float (1.5,   "TP1 × ATR",        minval=0.1, group="Trade Levels", step=0.1)
+tpMult2  = input.float (3.0,   "TP2 × ATR",        minval=0.1, group="Trade Levels", step=0.1)
+showTPs  = input.bool  (true,  "Show TP Levels",               group="Trade Levels")
+showBG   = input.bool  (true,  "Show Background Color",        group="Visuals")
+
+// ─────────────────────────────────────────────────────────────
+// CORE CALCULATIONS
+// ─────────────────────────────────────────────────────────────
+atrVal  = ta.atr(atrLen)
+
+// RMA of high and low (matches "high low" in params)
+rmaHigh = ta.rma(high, atrLen)
+rmaLow  = ta.rma(low,  atrLen)
+rmaHL2  = ta.rma(hl2,  atrLen)
+
+// Keltner-style upper and lower bands
+upperRaw = rmaHigh + atrMult * atrVal
+lowerRaw = rmaLow  - atrMult * atrVal
+
+// ─────────────────────────────────────────────────────────────
+// SUPERTREND  (correct ratchet logic)
+// ─────────────────────────────────────────────────────────────
+// Ratchet: lower band only moves up, upper only moves down
+float upperBand = na
+float lowerBand = na
+
+upperBand := (nz(upperRaw[1]) < upperRaw or close[1] > nz(upperRaw[1])) ? upperRaw : nz(upperRaw[1])
+lowerBand := (nz(lowerRaw[1]) > lowerRaw or close[1] < nz(lowerRaw[1])) ? lowerRaw : nz(lowerRaw[1])
+
+var int   direction  = 1
+var float superTrend = na
+
+superTrend := na(superTrend[1]) ? lowerBand :
+              superTrend[1] == nz(upperBand[1]) ?
+                  (close > upperBand ? lowerBand : upperBand) :
+                  (close < lowerBand ? upperBand : lowerBand)
+
+direction := superTrend == upperBand ? -1 : 1
+
+// ─────────────────────────────────────────────────────────────
+// SECONDARY LINES
+// ─────────────────────────────────────────────────────────────
+// Teal oscillator — RMA of low, 24-period (tracks below price)
+tealLine   = ta.rma(low,  maLen)
+
+// Thin outer upper channel (the faint red line above)
+outerUpper = ta.rma(high, maLen) + atrMult * atrVal
+
+// ─────────────────────────────────────────────────────────────
+// SIGNALS
+// ─────────────────────────────────────────────────────────────
+buySignal  = direction ==  1 and direction[1] == -1
+sellSignal = direction == -1 and direction[1] ==  1
+
+// ─────────────────────────────────────────────────────────────
+// TRADE STATE, STOP LOSS & TAKE PROFIT
+// ─────────────────────────────────────────────────────────────
+var bool  inLong   = false
+var bool  inShort  = false
+var float entryPx  = na
+var float longSL   = na
+var float shortSL  = na
+var float longTP1  = na
+var float longTP2  = na
+var float shortTP1 = na
+var float shortTP2 = na
+var int   signalBar = na   // bar_index of last signal (for "Trade Active" label)
+
+if buySignal
+    inLong   := true
+    inShort  := false
+    entryPx  := close
+    longSL   := lowerBand
+    longTP1  := close + tpMult1 * atrVal
+    longTP2  := close + tpMult2 * atrVal
+    shortSL  := na
+    shortTP1 := na
+    shortTP2 := na
+    signalBar := bar_index
+
+if sellSignal
+    inShort  := true
+    inLong   := false
+    entryPx  := close
+    shortSL  := upperBand
+    shortTP1 := close - tpMult1 * atrVal
+    shortTP2 := close - tpMult2 * atrVal
+    longSL   := na
+    longTP1  := na
+    longTP2  := na
+    signalBar := bar_index
+
+// Trail SL with supertrend
+if inLong
+    longSL  := math.max(nz(longSL, lowerBand), lowerBand)
+if inShort
+    shortSL := math.min(nz(shortSL, upperBand), upperBand)
+
+// ─────────────────────────────────────────────────────────────
+// COLORS
+// ─────────────────────────────────────────────────────────────
+C_BULL     = color.new(color.green, 0)
+C_BEAR     = color.new(color.red,   0)
+C_TEAL     = color.new(color.teal,  10)
+C_RED_THIN = color.new(color.red,   55)
+C_BG_BULL  = color.new(color.green, 92)
+C_BG_BEAR  = color.new(color.red,   92)
+
+// ─────────────────────────────────────────────────────────────
+// BACKGROUND SHADING
+// ─────────────────────────────────────────────────────────────
+bgcolor(showBG ? (direction == 1 ? C_BG_BULL : C_BG_BEAR) : na,
+  title="Trend Background")
+
+// ─────────────────────────────────────────────────────────────
+// PLOT — LINES
+// ─────────────────────────────────────────────────────────────
+// Thin outer upper channel (faint red, always visible)
+plot(outerUpper, "Outer Upper",
+  color     = C_RED_THIN,
+  linewidth = 1)
+
+// Lower green band (always plotted green — the "floor" line)
+plot(lowerBand, "Lower Band",
+  color     = C_BULL,
+  linewidth = 3)
+
+// Upper red band (always plotted red — the "ceiling" line)
+plot(upperBand, "Upper Band",
+  color     = C_BEAR,
+  linewidth = 3)
+
+// Teal oscillator line (24-period RMA of low)
+plot(tealLine, "Teal Oscillator",
+  color     = C_TEAL,
+  linewidth = 1)
+
+// ─────────────────────────────────────────────────────────────
+// BUY / SELL LABELS
+// ─────────────────────────────────────────────────────────────
+if buySignal
+    label.new(bar_index, low,
+      text      = "Buy",
+      color     = color.green,
+      textcolor = color.white,
+      style     = label.style_label_up,
+      size      = size.small)
+
+if sellSignal
+    label.new(bar_index, high,
+      text      = "Sell",
+      color     = color.red,
+      textcolor = color.white,
+      style     = label.style_label_down,
+      size      = size.small)
+
+// ─────────────────────────────────────────────────────────────
+// "TRADE ACTIVE" LABEL  (last bar only)
+// ─────────────────────────────────────────────────────────────
+if barstate.islast and (inLong or inShort)
+    tradeColor = inLong ? color.green : color.red
+    tradeText  = "Trade Active\n" +
+      (inLong  ? "Long  @ " + str.tostring(math.round(entryPx, 2))  : "") +
+      (inShort ? "Short @ " + str.tostring(math.round(entryPx, 2)) : "")
+    label.new(bar_index, inLong ? lowerBand : upperBand,
+      text      = tradeText,
+      color     = tradeColor,
+      textcolor = color.white,
+      style     = label.style_label_left,
+      size      = size.normal)
+
+// ─────────────────────────────────────────────────────────────
+// TP & SL HORIZONTAL LINES  (drawn once on last bar)
+// ─────────────────────────────────────────────────────────────
+var line slLine  = na
+var line tp1Line = na
+var line tp2Line = na
+
+if barstate.islast
+    // Delete previous to avoid stacking
+    line.delete(slLine)
+    line.delete(tp1Line)
+    line.delete(tp2Line)
+
+    int startBar = math.max(0, bar_index - 50)
+
+    if inLong and not na(longSL)
+        slLine  := line.new(startBar, longSL,  bar_index, longSL,
+          color=color.red,            style=line.style_dotted, width=2, extend=extend.right)
+    if inShort and not na(shortSL)
+        slLine  := line.new(startBar, shortSL, bar_index, shortSL,
+          color=color.red,            style=line.style_dotted, width=2, extend=extend.right)
+
+    if showTPs
+        if inLong and not na(longTP1)
+            tp1Line := line.new(startBar, longTP1, bar_index, longTP1,
+              color=color.new(color.green, 30), style=line.style_dashed, width=1, extend=extend.right)
+        if inLong and not na(longTP2)
+            tp2Line := line.new(startBar, longTP2, bar_index, longTP2,
+              color=color.new(color.green, 50), style=line.style_dashed, width=1, extend=extend.right)
+        if inShort and not na(shortTP1)
+            tp1Line := line.new(startBar, shortTP1, bar_index, shortTP1,
+              color=color.new(color.teal, 30),  style=line.style_dashed, width=1, extend=extend.right)
+        if inShort and not na(shortTP2)
+            tp2Line := line.new(startBar, shortTP2, bar_index, shortTP2,
+              color=color.new(color.teal, 50),  style=line.style_dashed, width=1, extend=extend.right)
+
+// ─────────────────────────────────────────────────────────────
+// RIGHT-SIDE PRICE LABELS  (SL, Entry, TP1, TP2)
+// ─────────────────────────────────────────────────────────────
+var label lblSL   = na
+var label lblEntry = na
+var label lblTP1  = na
+var label lblTP2  = na
+
+if barstate.islast
+    label.delete(lblSL)
+    label.delete(lblEntry)
+    label.delete(lblTP1)
+    label.delete(lblTP2)
+
+    if inLong
+        if not na(longSL)
+            lblSL    := label.new(bar_index + 1, longSL,
+              "SL  " + str.tostring(math.round(longSL, 2)),
+              color=color.red,   textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+        if not na(entryPx)
+            lblEntry := label.new(bar_index + 1, entryPx,
+              "Entry " + str.tostring(math.round(entryPx, 2)),
+              color=color.new(color.teal, 0), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+        if showTPs and not na(longTP1)
+            lblTP1   := label.new(bar_index + 1, longTP1,
+              "TP1 " + str.tostring(math.round(longTP1, 2)),
+              color=color.green, textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+        if showTPs and not na(longTP2)
+            lblTP2   := label.new(bar_index + 1, longTP2,
+              "TP2 " + str.tostring(math.round(longTP2, 2)),
+              color=color.new(color.green, 30), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+
+    if inShort
+        if not na(shortSL)
+            lblSL    := label.new(bar_index + 1, shortSL,
+              "SL  " + str.tostring(math.round(shortSL, 2)),
+              color=color.red,   textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+        if not na(entryPx)
+            lblEntry := label.new(bar_index + 1, entryPx,
+              "Entry " + str.tostring(math.round(entryPx, 2)),
+              color=color.new(color.teal, 0), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+        if showTPs and not na(shortTP1)
+            lblTP1   := label.new(bar_index + 1, shortTP1,
+              "TP1 " + str.tostring(math.round(shortTP1, 2)),
+              color=color.new(color.teal, 30), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+        if showTPs and not na(shortTP2)
+            lblTP2   := label.new(bar_index + 1, shortTP2,
+              "TP2 " + str.tostring(math.round(shortTP2, 2)),
+              color=color.new(color.teal, 50), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+
+// ─────────────────────────────────────────────────────────────
+// BOTTOM INFO TABLE  (SL prices)
+// ─────────────────────────────────────────────────────────────
+var table slTable = table.new(position.bottom_left, 1, 2,
+  border_color=color.gray, border_width=1,
+  bgcolor=color.new(color.white, 5))
+
+if barstate.islast
+    shortTxt = not na(shortSL) ? str.tostring(math.round(shortSL, 1)) : "–"
+    longTxt  = not na(longSL)  ? str.tostring(math.round(longSL,  1)) : "–"
+
+    table.cell(slTable, 0, 0,
+      "Short order SL: " + shortTxt,
+      text_color=color.red,  bgcolor=color.new(color.white, 10),
+      text_size=size.small)
+    table.cell(slTable, 0, 1,
+      "Long order SL:  " + longTxt,
+      text_color=color.teal, bgcolor=color.new(color.white, 10),
+      text_size=size.small)
+
+// ─────────────────────────────────────────────────────────────
+// ALERT CONDITIONS
+// ─────────────────────────────────────────────────────────────
+alertcondition(buySignal,  "Zimpact — BUY",  "🟢 Zimpact BUY signal on {{ticker}} @ {{close}}")
+alertcondition(sellSignal, "Zimpact — SELL", "🔴 Zimpact SELL signal on {{ticker}} @ {{close}}")

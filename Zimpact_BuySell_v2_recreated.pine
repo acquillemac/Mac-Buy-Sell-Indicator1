@@ -1,0 +1,613 @@
+// ============================================================
+//  Zimpact Buy/Sell Signal  v3  (Pine Script v6)  - ENHANCED
+//  Original params: 14 | RMA | 1.5 | high | low | hl2 | 24 | 0 | close
+//
+//  v3 ADDS  (Smart Money Concepts):
+//    • Auto Support / Resistance zones (clustered, ATR-width)
+//    • Break of Structure  (BOS)
+//    • Change of Character (CHoCH)
+//    • Market Structure labels (HH / HL / LH / LL)
+//    • Fair Value Gaps (FVG / imbalance zones)
+//    • Premium / Discount midline of last swing range
+//
+//  v2 features preserved:
+//    • EMA crossover filter
+//    • Auto-close on opposite signal, win-rate stats
+//    • TP1 hit marker, TP / SL horizontal lines & right-side labels
+//    • Commission / slippage inputs, multi-channel alerts
+// ============================================================
+//@version=6
+indicator("Zimpact Buy/Sell v3 (Enhanced)",
+  overlay                = true,
+  max_labels_count       = 500,
+  max_lines_count        = 500,
+  max_boxes_count        = 500)
+
+// ─────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────
+atrLen       = input.int   (14,    "ATR Length",          minval=1,    group="Core")
+atrMult      = input.float (1.5,   "ATR Multiplier",      minval=0.1,  group="Core", step=0.1)
+maLen        = input.int   (24,    "MA Length (Teal)",    minval=1,    group="Core")
+tpMult1      = input.float (1.5,   "TP1 x ATR",           minval=0.1,  group="Trade Levels", step=0.1)
+tpMult2      = input.float (3.0,   "TP2 x ATR",           minval=0.1,  group="Trade Levels", step=0.1)
+showTPs      = input.bool  (true,  "Show TP Levels",                   group="Trade Levels")
+showBG       = input.bool  (true,  "Show Background Color",            group="Visuals")
+
+useFilter    = input.bool  (true,  "Use EMA Cross Filter",             group="Filters")
+emaFastLen   = input.int   (9,     "EMA Fast Length",      minval=1,   group="Filters")
+emaSlowLen   = input.int   (21,    "EMA Slow Length",      minval=1,   group="Filters")
+
+commPct      = input.float (0.0,   "Commission %",         minval=0.0,  group="Backtest", step=0.01)
+slipTicks    = input.int   (0,     "Slippage (ticks)",     minval=0,    group="Backtest")
+
+showStats    = input.bool  (true,  "Show Win-Rate Stats",              group="Visuals")
+
+// ── Structure / SMC inputs ───────────────────────────────────
+showSR       = input.bool  (true,  "Show Support / Resistance Zones",   group="Structure")
+showBOS      = input.bool  (true,  "Show BOS / CHoCH",                 group="Structure")
+showMS       = input.bool  (true,  "Show Market Structure (HH/HL/LH/LL)", group="Structure")
+showFVG      = input.bool  (true,  "Show Fair Value Gaps",             group="Structure")
+showPD       = input.bool  (true,  "Show Premium / Discount midline",  group="Structure")
+pivotLen     = input.int   (5,     "Pivot Lookback",       minval=2,   maxval=50,  group="Structure")
+maxZones     = input.int   (5,     "Max S/R Zones",        minval=1,   maxval=20,  group="Structure")
+zoneWidthA   = input.float (0.5,   "Zone Width (ATR mult)", minval=0.1, step=0.1,  group="Structure")
+fvgMinA      = input.float (0.5,   "Min FVG Size (ATR mult)", minval=0.0, step=0.1, group="Structure")
+maxFVGs      = input.int   (3,     "Max FVG Zones",        minval=0,   maxval=20,  group="Structure")
+bosLookback  = input.int   (10,    "BOS Lookback Bars",    minval=1,   maxval=50,  group="Structure")
+
+// ─────────────────────────────────────────────────────────────
+// CORE CALCULATIONS
+// ─────────────────────────────────────────────────────────────
+atrVal  = ta.atr(atrLen)
+
+rmaHigh = ta.rma(high, atrLen)
+rmaLow  = ta.rma(low,  atrLen)
+rmaHL2  = ta.rma(hl2,  atrLen)
+
+upperRaw = rmaHigh + atrMult * atrVal
+lowerRaw = rmaLow  - atrMult * atrVal
+
+// ─────────────────────────────────────────────────────────────
+// SUPERTREND  (ratchet logic)
+// ─────────────────────────────────────────────────────────────
+var float upperBand = na
+var float lowerBand = na
+
+upperBand := (nz(upperRaw[1]) < upperRaw or close[1] > nz(upperRaw[1])) ? upperRaw : nz(upperRaw[1])
+lowerBand := (nz(lowerRaw[1]) > lowerRaw or close[1] < nz(lowerRaw[1])) ? lowerRaw : nz(lowerRaw[1])
+
+var int   direction  = 1
+var float superTrend = na
+
+superTrend := na(superTrend[1]) ? lowerBand :
+              superTrend[1] == nz(upperBand[1]) ?
+                  (close > upperBand ? lowerBand : upperBand) :
+                  (close < lowerBand ? upperBand : lowerBand)
+
+direction := superTrend == upperBand ? -1 : 1
+
+// ─────────────────────────────────────────────────────────────
+// SECONDARY LINES
+// ─────────────────────────────────────────────────────────────
+tealLine   = ta.rma(low,  maLen)
+outerUpper = ta.rma(high, maLen) + atrMult * atrVal
+
+// EMA filter
+emaFast    = ta.ema(close, emaFastLen)
+emaSlow    = ta.ema(close, emaSlowLen)
+emaBull    = emaFast > emaSlow
+emaBear    = emaFast < emaSlow
+
+// ─────────────────────────────────────────────────────────────
+// SIGNALS  (raw + filtered)
+// ─────────────────────────────────────────────────────────────
+rawBuy     = direction ==  1 and direction[1] == -1
+rawSell    = direction == -1 and direction[1] ==  1
+
+buySignal  = rawBuy  and (not useFilter or  emaBull)
+sellSignal = rawSell and (not useFilter or  emaBear)
+
+// ─────────────────────────────────────────────────────────────
+// TRADE STATE, STOP LOSS & TAKE PROFIT
+// ─────────────────────────────────────────────────────────────
+var bool  inLong       = false
+var bool  inShort      = false
+var float entryPx      = na
+var float longSL       = na
+var float shortSL      = na
+var float longTP1      = na
+var float longTP2      = na
+var float shortTP1     = na
+var float shortTP2     = na
+var int   signalBar    = na
+var bool  tp1HitLong   = false
+var bool  tp1HitShort  = false
+var int   wins         = 0
+var int   losses       = 0
+var int   trades       = 0
+
+if buySignal
+    inLong   := true
+    inShort  := false
+    entryPx  := close
+    longSL   := lowerBand
+    longTP1  := close + tpMult1 * atrVal
+    longTP2  := close + tpMult2 * atrVal
+    shortSL  := na
+    shortTP1 := na
+    shortTP2 := na
+    signalBar    := bar_index
+    tp1HitLong   := false
+    tp1HitShort  := false
+
+if sellSignal
+    inShort     := true
+    inLong      := false
+    entryPx     := close
+    shortSL     := upperBand
+    shortTP1    := close - tpMult1 * atrVal
+    shortTP2    := close - tpMult2 * atrVal
+    longSL      := na
+    longTP1     := na
+    longTP2     := na
+    signalBar   := bar_index
+    tp1HitLong  := false
+    tp1HitShort := false
+
+// Auto-close on opposite signal — track wins/losses
+if sellSignal and inLong
+    trades += 1
+    if close > entryPx
+        wins += 1
+    else
+        losses += 1
+
+if buySignal and inShort
+    trades += 1
+    if close < entryPx
+        wins += 1
+    else
+        losses += 1
+
+// Trail SL with supertrend
+if inLong
+    longSL  := math.max(nz(longSL, lowerBand), lowerBand)
+if inShort
+    shortSL := math.min(nz(shortSL, upperBand), upperBand)
+
+// Track TP1 hits (visual marker only)
+if inLong and not tp1HitLong and not na(longTP1) and high >= longTP1
+    tp1HitLong := true
+if inShort and not tp1HitShort and not na(shortTP1) and low <= shortTP1
+    tp1HitShort := true
+
+// ─────────────────────────────────────────────────────────────
+// ████  PIVOT DETECTION  ████
+// ─────────────────────────────────────────────────────────────
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow (low,  pivotLen, pivotLen)
+
+// ─────────────────────────────────────────────────────────────
+// ████  MARKET STRUCTURE  ████
+//   Tracks recent swing highs/lows and labels them HH/HL/LH/LL.
+// ─────────────────────────────────────────────────────────────
+var float[] swingHiPx  = array.new_float(0)
+var int[]   swingHiBar = array.new_int  (0)
+var int[]   swingHiKind = array.new_int  (0)   // +1 = HH, -1 = LH
+
+var float[] swingLoPx  = array.new_float(0)
+var int[]   swingLoBar = array.new_int  (0)
+var int[]   swingLoKind = array.new_int  (0)   // +1 = HL, -1 = LL
+
+if not na(ph)
+    int   kind = 1
+    if array.size(swingHiPx) > 0
+        kind := ph > array.last(swingHiPx) ? 1 : -1
+    array.push(swingHiPx,   ph)
+    array.push(swingHiBar,  bar_index - pivotLen)
+    array.push(swingHiKind, kind)
+    if array.size(swingHiPx) > maxZones
+        array.shift(swingHiPx)
+        array.shift(swingHiBar)
+        array.shift(swingHiKind)
+
+if not na(pl)
+    int   kind = 1
+    if array.size(swingLoPx) > 0
+        kind := pl > array.last(swingLoPx) ? 1 : -1
+    array.push(swingLoPx,   pl)
+    array.push(swingLoBar,  bar_index - pivotLen)
+    array.push(swingLoKind, kind)
+    if array.size(swingLoPx) > maxZones
+        array.shift(swingLoPx)
+        array.shift(swingLoBar)
+        array.shift(swingLoKind)
+
+// ─────────────────────────────────────────────────────────────
+// ████  BOS / CHoCH  ████
+//   BOS   = break in direction of prevailing trend.
+//   CHoCH = first break AGAINST the prevailing trend (reversal).
+// ─────────────────────────────────────────────────────────────
+var int  trendState  = 0     // 1 = bullish, -1 = bearish
+var int  lastBosDir  = 0     // direction of last BOS, used to gate duplicates
+
+bosUp   = false
+bosDn   = false
+chochUp = false
+chochDn = false
+
+// Bullish break — close crosses above the most recent swing high
+if array.size(swingHiPx) > 0
+    float refHi = array.last(swingHiPx)
+    int   refHiBar = array.last(swingHiBar)
+    if bar_index - refHiBar <= bosLookback and close > refHi and close[1] <= refHi
+        bosUp := true
+        if trendState == -1
+            chochUp := true
+            trendState := 1
+        else if trendState == 0
+            trendState := 1
+
+// Bearish break — close crosses below the most recent swing low
+if array.size(swingLoPx) > 0
+    float refLo = array.last(swingLoPx)
+    int   refLoBar = array.last(swingLoBar)
+    if bar_index - refLoBar <= bosLookback and close < refLo and close[1] >= refLo
+        bosDn := true
+        if trendState == 1
+            chochDn := true
+            trendState := -1
+        else if trendState == 0
+            trendState := -1
+
+// ─────────────────────────────────────────────────────────────
+// ████  FAIR VALUE GAPS  ████
+//   3-candle imbalance: gap between candle 0 and candle 2.
+// ─────────────────────────────────────────────────────────────
+bullFVG = low  > high[2]   // gap up
+bearFVG = high < low[2]    // gap down
+fvgSize = bullFVG ? (low - high[2]) : (bearFVG ? (low[2] - high) : 0.0)
+fvgOk   = fvgSize >= fvgMinA * atrVal
+
+var box[]   fvgBoxes   = array.new_box  (0)
+var label[] fvgLabels  = array.new_label(0)
+
+if bullFVG and fvgOk and array.size(fvgBoxes) < maxFVGs * 2
+    b = box.new(bar_index, low, bar_index + 30, high[2],
+      bgcolor=color.new(color.green, 85), border_color=color.new(color.green, 40))
+    array.push(fvgBoxes,  b)
+    array.push(fvgLabels, label.new(bar_index + 5, (low + high[2]) / 2, "FVG",
+      style=label.style_label_left, color=color.new(color.green, 60),
+      textcolor=color.white, size=size.tiny))
+
+if bearFVG and fvgOk and array.size(fvgBoxes) < maxFVGs * 2
+    b = box.new(bar_index, low[2], bar_index + 30, high,
+      bgcolor=color.new(color.red, 85), border_color=color.new(color.red, 40))
+    array.push(fvgBoxes,  b)
+    array.push(fvgLabels, label.new(bar_index + 5, (low[2] + high) / 2, "FVG",
+      style=label.style_label_left, color=color.new(color.red, 60),
+      textcolor=color.white, size=size.tiny))
+
+// Trim FVG arrays so total drawn <= maxFVGs each side
+if array.size(fvgBoxes) > maxFVGs * 2
+    box.delete  (array.shift(fvgBoxes))
+    label.delete(array.shift(fvgLabels))
+
+// Extend existing FVG boxes & their labels to current bar
+if array.size(fvgBoxes) > 0
+    for i = 0 to array.size(fvgBoxes) - 1
+        box.set_right (array.get(fvgBoxes,  i), bar_index + 30)
+        label.set_x   (array.get(fvgLabels, i), bar_index + 5)
+
+// ─────────────────────────────────────────────────────────────
+// COLORS
+// ─────────────────────────────────────────────────────────────
+C_BULL     = color.new(color.green, 0)
+C_BEAR     = color.new(color.red,   0)
+C_TEAL     = color.new(color.teal,  10)
+C_RED_THIN = color.new(color.red,   55)
+C_BG_BULL  = color.new(color.green, 92)
+C_BG_BEAR  = color.new(color.red,   92)
+
+// ─────────────────────────────────────────────────────────────
+// BACKGROUND SHADING
+// ─────────────────────────────────────────────────────────────
+bgcolor(showBG ? (direction == 1 ? C_BG_BULL : C_BG_BEAR) : na,
+  title="Trend Background")
+
+// ─────────────────────────────────────────────────────────────
+// PLOT — LINES
+// ─────────────────────────────────────────────────────────────
+plot(outerUpper, "Outer Upper",   color=C_RED_THIN, linewidth=1)
+plot(lowerBand,  "Lower Band",    color=C_BULL,    linewidth=3)
+plot(upperBand,  "Upper Band",    color=C_BEAR,    linewidth=3)
+plot(tealLine,   "Teal Oscillator", color=C_TEAL,  linewidth=1)
+plot(showStats and useFilter ? emaFast : na, "EMA Fast",
+  color=color.new(color.orange, 40), linewidth=1)
+plot(showStats and useFilter ? emaSlow : na, "EMA Slow",
+  color=color.new(color.purple, 40), linewidth=1)
+
+// ─────────────────────────────────────────────────────────────
+// ████  PREMIUM / DISCOUNT MIDLINE  ████
+//   50% line of last swing range (last swing high ↔ last swing low).
+// ─────────────────────────────────────────────────────────────
+var float eqHi = na
+var float eqLo = na
+if array.size(swingHiPx) > 0
+    eqHi := array.last(swingHiPx)
+if array.size(swingLoPx) > 0
+    eqLo := array.last(swingLoPx)
+eqMid = (eqHi + eqLo) / 2.0
+
+plot(showPD and not na(eqMid) ? eqMid : na, "EQ (50%)",
+  color=color.new(color.yellow, 40), linewidth=1, style=plot.style_stepline)
+
+if showPD and not na(eqMid) and barstate.islast
+    label.new(bar_index + 2, eqMid,
+      "EQ " + str.tostring(math.round(eqMid, 2)),
+      style=label.style_label_left, color=color.new(color.yellow, 30),
+      textcolor=color.white, size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────
+// ████  SUPPORT / RESISTANCE ZONES  ████
+//   Drawn from top-N most recent swing pivots.  Extend right.
+// ─────────────────────────────────────────────────────────────
+var box[] srBoxes = array.new_box(0)
+
+if barstate.islast and showSR
+    // Clean up previous draw
+    if array.size(srBoxes) > 0
+        for i = 0 to array.size(srBoxes) - 1
+            box.delete(array.get(srBoxes, i))
+        array.clear(srBoxes)
+
+    float zw  = atrVal * zoneWidthA
+    int   rhN = math.min(maxZones, array.size(swingHiPx))
+    int   rlN = math.min(maxZones, array.size(swingLoPx))
+
+    // Resistance (red) — from swing highs
+    if rhN > 0
+        for i = 0 to rhN - 1
+            int   idx = array.size(swingHiPx)  - 1 - i
+            float h   = array.get (swingHiPx,  idx)
+            int   b   = array.get (swingHiBar, idx)
+            box.new(b, h + zw, bar_index + 20, h - zw,
+              bgcolor=color.new(color.red, 88),
+              border_color=color.new(color.red, 50),
+              border_width=1,
+              text="R", text_color=color.white, text_size=size.tiny)
+
+    // Support (green) — from swing lows
+    if rlN > 0
+        for i = 0 to rlN - 1
+            int   idx = array.size(swingLoPx)  - 1 - i
+            float l   = array.get (swingLoPx,  idx)
+            int   b   = array.get (swingLoBar, idx)
+            box.new(b, l + zw, bar_index + 20, l - zw,
+              bgcolor=color.new(color.green, 88),
+              border_color=color.new(color.green, 50),
+              border_width=1,
+              text="S", text_color=color.white, text_size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────
+// BUY / SELL LABELS  (Zimpact signals — original)
+// ─────────────────────────────────────────────────────────────
+if buySignal
+    label.new(bar_index, low, "Buy",
+      color=color.green, textcolor=color.white,
+      style=label.style_label_up, size=size.small)
+
+if sellSignal
+    label.new(bar_index, high, "Sell",
+      color=color.red, textcolor=color.white,
+      style=label.style_label_down, size=size.small)
+
+// TP1 hit markers
+if tp1HitLong and not tp1HitLong[1]
+    label.new(bar_index, high, "TP1",
+      color=color.new(color.green, 30), textcolor=color.white,
+      style=label.style_label_down, size=size.tiny)
+if tp1HitShort and not tp1HitShort[1]
+    label.new(bar_index, low, "TP1",
+      color=color.new(color.teal, 30), textcolor=color.white,
+      style=label.style_label_up, size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────
+// ████  MARKET STRUCTURE LABELS (HH / HL / LH / LL)  ████
+// ─────────────────────────────────────────────────────────────
+if showMS and not na(ph)
+    int   idx    = array.size(swingHiPx) - 1
+    int   kind   = array.get(swingHiKind, idx)
+    int   b      = array.get(swingHiBar,  idx)
+    string txt   = kind ==  1 ? "HH" : "LH"
+    color  bg    = kind ==  1 ? color.green : color.red
+    label.new(b, ph, txt,
+      style=label.style_label_down,
+      color=color.new(bg, 20), textcolor=color.white, size=size.tiny)
+
+if showMS and not na(pl)
+    int   idx    = array.size(swingLoPx) - 1
+    int   kind   = array.get(swingLoKind, idx)
+    int   b      = array.get(swingLoBar,  idx)
+    string txt   = kind ==  1 ? "HL" : "LL"
+    color  bg    = kind ==  1 ? color.green : color.red
+    label.new(b, pl, txt,
+      style=label.style_label_up,
+      color=color.new(bg, 20), textcolor=color.white, size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────
+// ████  BOS / CHoCH LABELS  ████
+// ─────────────────────────────────────────────────────────────
+if showBOS and bosUp and not chochUp
+    label.new(bar_index, high, "BOS ▲",
+      style=label.style_label_down,
+      color=color.new(color.green, 10), textcolor=color.white, size=size.small)
+
+if showBOS and bosDn and not chochDn
+    label.new(bar_index, low, "BOS ▼",
+      style=label.style_label_up,
+      color=color.new(color.red, 10), textcolor=color.white, size=size.small)
+
+if showBOS and chochUp
+    label.new(bar_index, high, "CHoCH ▲",
+      style=label.style_label_down,
+      color=color.new(color.blue, 10), textcolor=color.white, size=size.small)
+
+if showBOS and chochDn
+    label.new(bar_index, low, "CHoCH ▼",
+      style=label.style_label_up,
+      color=color.new(color.orange, 10), textcolor=color.white, size=size.small)
+
+// ─────────────────────────────────────────────────────────────
+// "TRADE ACTIVE" LABEL  (last bar only)
+// ─────────────────────────────────────────────────────────────
+if barstate.islast and (inLong or inShort)
+    string tradeText = "Trade Active\n" +
+      (inLong  ? "Long  @ "  + str.tostring(math.round(entryPx, 2)) : "") +
+      (inShort ? "Short @ "  + str.tostring(math.round(entryPx, 2)) : "")
+    color tradeColor = inLong ? color.green : color.red
+    label.new(bar_index, inLong ? lowerBand : upperBand,
+      text=tradeText, color=tradeColor, textcolor=color.white,
+      style=label.style_label_left, size=size.normal)
+
+// ─────────────────────────────────────────────────────────────
+// TP & SL HORIZONTAL LINES  (drawn once on last bar)
+// ─────────────────────────────────────────────────────────────
+var line slLine  = na
+var line tp1Line = na
+var line tp2Line = na
+
+if barstate.islast
+    line.delete(slLine)
+    line.delete(tp1Line)
+    line.delete(tp2Line)
+
+    int startBar = math.max(0, bar_index - 50)
+
+    if inLong and not na(longSL)
+        slLine := line.new(startBar, longSL, bar_index, longSL,
+          color=color.red, style=line.style_dotted, width=2, extend=extend.right)
+    if inShort and not na(shortSL)
+        slLine := line.new(startBar, shortSL, bar_index, shortSL,
+          color=color.red, style=line.style_dotted, width=2, extend=extend.right)
+
+    if showTPs
+        if inLong and not na(longTP1)
+            tp1Line := line.new(startBar, longTP1, bar_index, longTP1,
+              color=color.new(color.green, 30), style=line.style_dashed, width=1, extend=extend.right)
+        if inLong and not na(longTP2)
+            tp2Line := line.new(startBar, longTP2, bar_index, longTP2,
+              color=color.new(color.green, 50), style=line.style_dashed, width=1, extend=extend.right)
+        if inShort and not na(shortTP1)
+            tp1Line := line.new(startBar, shortTP1, bar_index, shortTP1,
+              color=color.new(color.teal, 30), style=line.style_dashed, width=1, extend=extend.right)
+        if inShort and not na(shortTP2)
+            tp2Line := line.new(startBar, shortTP2, bar_index, shortTP2,
+              color=color.new(color.teal, 50), style=line.style_dashed, width=1, extend=extend.right)
+
+// ─────────────────────────────────────────────────────────────
+// RIGHT-SIDE PRICE LABELS
+// ─────────────────────────────────────────────────────────────
+var label lblSL    = na
+var label lblEntry = na
+var label lblTP1   = na
+var label lblTP2   = na
+
+if barstate.islast
+    label.delete(lblSL)
+    label.delete(lblEntry)
+    label.delete(lblTP1)
+    label.delete(lblTP2)
+
+    if inLong
+        if not na(longSL)
+            lblSL := label.new(bar_index + 1, longSL,
+              "SL  " + str.tostring(math.round(longSL, 2)),
+              color=color.red, textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+        if not na(entryPx)
+            lblEntry := label.new(bar_index + 1, entryPx,
+              "Entry " + str.tostring(math.round(entryPx, 2)),
+              color=color.new(color.teal, 0), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+        if showTPs and not na(longTP1)
+            lblTP1 := label.new(bar_index + 1, longTP1,
+              "TP1 " + str.tostring(math.round(longTP1, 2)),
+              color=color.green, textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+        if showTPs and not na(longTP2)
+            lblTP2 := label.new(bar_index + 1, longTP2,
+              "TP2 " + str.tostring(math.round(longTP2, 2)),
+              color=color.new(color.green, 30), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+
+    if inShort
+        if not na(shortSL)
+            lblSL := label.new(bar_index + 1, shortSL,
+              "SL  " + str.tostring(math.round(shortSL, 2)),
+              color=color.red, textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+        if not na(entryPx)
+            lblEntry := label.new(bar_index + 1, entryPx,
+              "Entry " + str.tostring(math.round(entryPx, 2)),
+              color=color.new(color.teal, 0), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+        if showTPs and not na(shortTP1)
+            lblTP1 := label.new(bar_index + 1, shortTP1,
+              "TP1 " + str.tostring(math.round(shortTP1, 2)),
+              color=color.new(color.teal, 30), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+        if showTPs and not na(shortTP2)
+            lblTP2 := label.new(bar_index + 1, shortTP2,
+              "TP2 " + str.tostring(math.round(shortTP2, 2)),
+              color=color.new(color.teal, 50), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+
+// ─────────────────────────────────────────────────────────────
+// BOTTOM INFO TABLE  (SL prices + win-rate stats)
+// ─────────────────────────────────────────────────────────────
+var table slTable = table.new(position.bottom_left, 1, 3,
+  border_color=color.gray, border_width=1,
+  bgcolor=color.new(color.white, 5))
+
+if barstate.islast
+    string shortTxt = not na(shortSL) ? str.tostring(math.round(shortSL, 1)) : "-"
+    string longTxt  = not na(longSL)  ? str.tostring(math.round(longSL,  1)) : "-"
+
+    table.cell(slTable, 0, 0,
+      "Short order SL: " + shortTxt,
+      text_color=color.red,  bgcolor=color.new(color.white, 10),
+      text_size=size.small)
+    table.cell(slTable, 0, 1,
+      "Long order SL:  " + longTxt,
+      text_color=color.teal, bgcolor=color.new(color.white, 10),
+      text_size=size.small)
+
+    if showStats
+        float wr       = trades > 0 ? (wins * 100.0 / trades) : 0.0
+        color wrColor  = wr >= 50.0 ? color.green : color.red
+        table.cell(slTable, 0, 2,
+          "Trades: " + str.tostring(trades) +
+          " | W: "  + str.tostring(wins)   +
+          " | L: "  + str.tostring(losses) +
+          " | WR: " + str.tostring(wr, "#.#") + "%",
+          text_color=wrColor, bgcolor=color.new(color.white, 10),
+          text_size=size.small)
+
+// ─────────────────────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────────────────────
+if buySignal
+    alert("BUY " + syminfo.ticker + " @ " + str.tostring(close) +
+          " | SL "  + str.tostring(entryPx - atrMult * atrVal) +
+          " | TP1 " + str.tostring(entryPx + tpMult1 * atrVal) +
+          " | TP2 " + str.tostring(entryPx + tpMult2 * atrVal),
+          alert.freq_once_per_bar_close)
+
+if sellSignal
+    alert("SELL " + syminfo.ticker + " @ " + str.tostring(close) +
+          " | SL "  + str.tostring(entryPx + atrMult * atrVal) +
+          " | TP1 " + str.tostring(entryPx - tpMult1 * atrVal) +
+          " | TP2 " + str.tostring(entryPx - tpMult2 * atrVal),
+          alert.freq_once_per_bar_close)
