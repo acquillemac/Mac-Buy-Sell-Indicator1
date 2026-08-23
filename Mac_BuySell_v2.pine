@@ -1,4 +1,5 @@
 // ============================================================
+
 // Mac Buy/Sell Signal  v2  (Pine Script v5)
 //  Params: 14 | RMA | 1.5 | high | low | hl2 | 24 | 0 | close
 //  Visual match: dual bands, TP levels, right-side price labels,
@@ -12,13 +13,18 @@ indicator("Zimpact Buy/Sell v2", overlay=true,
 // ─────────────────────────────────────────────────────────────
 // INPUTS
 // ─────────────────────────────────────────────────────────────
-atrLen   = input.int   (14,    "ATR Length",       minval=1,   group="Core")
-atrMult  = input.float (1.5,   "ATR Multiplier",   minval=0.1, group="Core", step=0.1)
-maLen    = input.int   (24,    "MA Length (Teal)", minval=1,   group="Core")
-tpMult1  = input.float (1.5,   "TP1 × ATR",        minval=0.1, group="Trade Levels", step=0.1)
-tpMult2  = input.float (3.0,   "TP2 × ATR",        minval=0.1, group="Trade Levels", step=0.1)
-showTPs  = input.bool  (true,  "Show TP Levels",               group="Trade Levels")
-showBG   = input.bool  (true,  "Show Background Color",        group="Visuals")
+atrLen        = input.int   (14,    "ATR Length",            minval=1,   group="Core")
+atrMult       = input.float (1.5,   "ATR Multiplier",        minval=0.1, group="Core", step=0.1)
+maLen         = input.int   (24,    "MA Length (Teal)",      minval=1,   group="Core")
+tpMult1       = input.float (1.5,   "TP1 × ATR",             minval=0.1, group="Trade Levels", step=0.1)
+tpMult2       = input.float (3.0,   "TP2 × ATR",             minval=0.1, group="Trade Levels", step=0.1)
+tpMinDistATR  = input.float (0.5,   "Min TP Distance (×ATR)", minval=0.0, group="Trade Levels", step=0.1, tooltip="Hide TP lines that are closer than this multiple of ATR to the current price (prevents crowding).")
+showTPs       = input.bool  (true,  "Show TP Levels",                    group="Trade Levels")
+showBG        = input.bool  (true,  "Show Background Color",             group="Visuals")
+showTeal      = input.bool  (false, "Show Teal Oscillator",              group="Visuals", tooltip="Off by default — duplicates the lower band and adds clutter.")
+showOuter     = input.bool  (true,  "Show Outer Channel",               group="Visuals", tooltip="Thin outer envelope above the upper band.")
+outerMult     = input.float (3.0,   "Outer Channel × ATR",  minval=0.1, group="Visuals", step=0.1, tooltip="Multiplier from upper band; raise to push the outer line further away.")
+extendTP      = input.bool  (false, "Extend TP/SL to Right Edge",       group="Visuals", tooltip="Off = lines stop near the entry bar to avoid stacking on the right edge.")
 
 // ─────────────────────────────────────────────────────────────
 // CORE CALCULATIONS
@@ -60,8 +66,8 @@ direction := superTrend == upperBand ? -1 : 1
 // Teal oscillator — RMA of low, 24-period (tracks below price)
 tealLine   = ta.rma(low,  maLen)
 
-// Thin outer upper channel (the faint red line above)
-outerUpper = ta.rma(high, maLen) + atrMult * atrVal
+// Thin outer upper channel (faint line above upper band — uses its own multiplier so it doesn't overlap)
+outerUpper = ta.rma(high, maLen) + outerMult * atrVal
 
 // ─────────────────────────────────────────────────────────────
 // SIGNALS
@@ -132,8 +138,8 @@ bgcolor(showBG ? (direction == 1 ? C_BG_BULL : C_BG_BEAR) : na,
 // ─────────────────────────────────────────────────────────────
 // PLOT — LINES
 // ─────────────────────────────────────────────────────────────
-// Thin outer upper channel (faint red, always visible)
-plot(outerUpper, "Outer Upper",
+// Thin outer upper channel (faint line above upper band)
+plot(showOuter ? outerUpper : na, "Outer Upper",
   color     = C_RED_THIN,
   linewidth = 1)
 
@@ -147,8 +153,8 @@ plot(upperBand, "Upper Band",
   color     = C_BEAR,
   linewidth = 3)
 
-// Teal oscillator line (24-period RMA of low)
-plot(tealLine, "Teal Oscillator",
+// Teal oscillator line (24-period RMA of low) — hidden by default to avoid overlapping the lower band
+plot(showTeal ? tealLine : na, "Teal Oscillator",
   color     = C_TEAL,
   linewidth = 1)
 
@@ -200,27 +206,35 @@ if barstate.islast
     line.delete(tp2Line)
 
     int startBar = math.max(0, bar_index - 50)
+    int endBar   = extendTP ? bar_index : math.min(bar_index, (not na(signalBar) ? signalBar : bar_index))
+    line_ext     = extendTP ? extend.right : extend.none
 
     if inLong and not na(longSL)
-        slLine  := line.new(startBar, longSL,  bar_index, longSL,
-          color=color.red,            style=line.style_dotted, width=2, extend=extend.right)
+        slLine  := line.new(startBar, longSL,  endBar, longSL,
+          color=color.red,            style=line.style_dotted, width=2, extend=line_ext)
     if inShort and not na(shortSL)
-        slLine  := line.new(startBar, shortSL, bar_index, shortSL,
-          color=color.red,            style=line.style_dotted, width=2, extend=extend.right)
+        slLine  := line.new(startBar, shortSL, endBar, shortSL,
+          color=color.red,            style=line.style_dotted, width=2, extend=line_ext)
 
-    if showTPs
+    // Hide TP lines that are too close to current price (would crowd the chart)
+    bool tp1Far = not na(entryPx) and math.abs((inLong ? longTP1 : shortTP1) - close) >= tpMinDistATR * atrVal
+    bool tp2Far = not na(entryPx) and math.abs((inLong ? longTP2 : shortTP2) - close) >= tpMinDistATR * atrVal
+
+    if showTPs and tp1Far
         if inLong and not na(longTP1)
-            tp1Line := line.new(startBar, longTP1, bar_index, longTP1,
-              color=color.new(color.green, 30), style=line.style_dashed, width=1, extend=extend.right)
-        if inLong and not na(longTP2)
-            tp2Line := line.new(startBar, longTP2, bar_index, longTP2,
-              color=color.new(color.green, 50), style=line.style_dashed, width=1, extend=extend.right)
+            tp1Line := line.new(startBar, longTP1, endBar, longTP1,
+              color=color.new(color.green, 30), style=line.style_dashed, width=1, extend=line_ext)
         if inShort and not na(shortTP1)
-            tp1Line := line.new(startBar, shortTP1, bar_index, shortTP1,
-              color=color.new(color.teal, 30),  style=line.style_dashed, width=1, extend=extend.right)
+            tp1Line := line.new(startBar, shortTP1, endBar, shortTP1,
+              color=color.new(color.teal, 30),  style=line.style_dashed, width=1, extend=line_ext)
+
+    if showTPs and tp2Far
+        if inLong and not na(longTP2)
+            tp2Line := line.new(startBar, longTP2, endBar, longTP2,
+              color=color.new(color.green, 50), style=line.style_dashed, width=1, extend=line_ext)
         if inShort and not na(shortTP2)
-            tp2Line := line.new(startBar, shortTP2, bar_index, shortTP2,
-              color=color.new(color.teal, 50),  style=line.style_dashed, width=1, extend=extend.right)
+            tp2Line := line.new(startBar, shortTP2, endBar, shortTP2,
+              color=color.new(color.teal, 50),  style=line.style_dashed, width=1, extend=line_ext)
 
 // ─────────────────────────────────────────────────────────────
 // RIGHT-SIDE PRICE LABELS  (SL, Entry, TP1, TP2)
@@ -288,17 +302,25 @@ var table slTable = table.new(position.bottom_left, 1, 2,
   bgcolor=color.new(color.white, 5))
 
 if barstate.islast
-    shortTxt = not na(shortSL) ? str.tostring(math.round(shortSL, 1)) : "–"
-    longTxt  = not na(longSL)  ? str.tostring(math.round(longSL,  1)) : "–"
+    // Show only the active trade's SL (one row), to reduce clutter
+    if inShort and not na(shortSL)
+        table.cell(slTable, 0, 0,
+          "Short SL: " + str.tostring(math.round(shortSL, 1)),
+          text_color=color.red,  bgcolor=color.new(color.white, 10),
+          text_size=size.small)
+    else if inLong and not na(longSL)
+        table.cell(slTable, 0, 0,
+          "Long SL:  " + str.tostring(math.round(longSL, 1)),
+          text_color=color.teal, bgcolor=color.new(color.white, 10),
+          text_size=size.small)
+    else
+        table.cell(slTable, 0, 0,
+          "No active trade",
+          text_color=color.gray, bgcolor=color.new(color.white, 10),
+          text_size=size.small)
 
-    table.cell(slTable, 0, 0,
-      "Short order SL: " + shortTxt,
-      text_color=color.red,  bgcolor=color.new(color.white, 10),
-      text_size=size.small)
-    table.cell(slTable, 0, 1,
-      "Long order SL:  " + longTxt,
-      text_color=color.teal, bgcolor=color.new(color.white, 10),
-      text_size=size.small)
+    // Clear the now-unused second row
+    table.cell(slTable, 0, 1, "")
 
 // ─────────────────────────────────────────────────────────────
 // ALERT CONDITIONS
