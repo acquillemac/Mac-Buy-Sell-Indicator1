@@ -1,5 +1,5 @@
 // ============================================================
-//  Zimpact Buy/Sell Signal  v2  (Pine Script v5)
+// Mac Buy/Sell Signal  v2  (Pine Script v5)
 //  Params: 14 | RMA | 1.5 | high | low | hl2 | 24 | 0 | close
 //  Visual match: dual bands, TP levels, right-side price labels,
 //                teal oscillator, trade-active label, SL table
