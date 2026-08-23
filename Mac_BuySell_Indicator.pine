@@ -30,7 +30,7 @@ indicator("Mac Buy/Sell Indicator",
   max_labels_count       = 500,
   max_lines_count        = 500,
   max_boxes_count        = 500)
-
+int max_labels_count = input.int(500, "Max Labels to Keep", minval=50)
 // ─────────────────────────────────────────────────────────────
 // INPUTS
 // ─────────────────────────────────────────────────────────────
